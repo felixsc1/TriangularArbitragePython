@@ -1,6 +1,7 @@
 from os import remove
 import requests
 import json
+import time
 
 
 def get_coin_tickers(url):
@@ -296,9 +297,9 @@ def calc_triangular_arb_surface_rate(t_pair, prices_dict):
                 calculated = 1
 
             # print out potential opportunities
-            # if acquired_coin_t3 > starting_amount:
-            #     print(direction, pair_a, pair_b, pair_c,
-            #           starting_amount, acquired_coin_t3)
+            if acquired_coin_t3 > starting_amount:
+                print(direction, pair_a, pair_b, pair_c,
+                      starting_amount, acquired_coin_t3)
 
         """ REVERSE """
         # Scenario Reverse-B: second pair contains the token of our first trade.
@@ -453,3 +454,154 @@ def calc_triangular_arb_surface_rate(t_pair, prices_dict):
             }
             return surface_dict  # if profitable will return forward calc, and not do reverse calc
     return surface_dict
+
+
+def reformat_orderbook(prices, c_direction):
+    """
+    api return looks like this:
+    {'asks': [['46073.66725037', 1.69984996], ['46082.09203307', 0.15],...}
+
+    if we go from base to quote we want to adjust those prices to 1/ask
+    and the quantity to be expressed in the unit of base
+    """
+    price_list_main = []
+    if c_direction == "base_to_quote":
+        for p in prices["asks"]:
+            ask_price = float(p[0])
+            # if something is weird in the orderbook we dont want to error out
+            adj_price = 1 / ask_price if ask_price != 0 else 0
+            adj_quantity = float(p[1]) * ask_price
+            price_list_main.append([adj_price, adj_quantity])
+    if c_direction == "quote_to_base":
+        for p in prices["bids"]:
+            bid_price = float(p[0])
+            # if something is weird in the orderbook we dont want to error out
+            adj_price = bid_price if bid_price != 0 else 0
+            adj_quantity = float(p[1])
+            price_list_main.append([adj_price, adj_quantity])
+    return price_list_main
+
+
+def calculate_acquired_coin(amount_in, orderbook):
+    # Get acquired coin aka depth calculation
+
+    # Initialize variables
+    trading_balance = amount_in
+    quantity_bought = 0
+    acquired_coin = 0
+    counts = 0
+
+    for level in orderbook:
+        # Extract the level price and quantity
+        level_price = level[0]
+        level_available_quantity = level[1]
+
+        # if amount_in <= first level total amount
+        if trading_balance <= level_available_quantity:
+            quantity_bought = trading_balance
+            trading_balance = 0
+            amount_bought = quantity_bought * level_price
+
+        # if amount_in > a given level total amount
+        if trading_balance > level_available_quantity:
+            quantity_bought = level_available_quantity
+            trading_balance -= quantity_bought
+            amount_bought = quantity_bought * level_price
+
+        # Accumulate acquired coin
+        acquired_coin += amount_bought
+
+        # Exit trade
+        if trading_balance == 0:
+            # print(f"starting amount: {amount_in}, acquired coin: {acquired_coin}")
+            return acquired_coin
+
+        # Exit if not enough orderbook levels
+        counts += 1
+        if counts == len(orderbook):
+            return 0
+
+
+def get_depth_from_orderbook(surface_arb):
+    """
+    https://docs.poloniex.com/#returnorderbook
+    """
+    # # Set some initial variables and coins for testing
+    swap_1 = "USDT"
+    starting_amount = 1
+    # to get realistic result set traded amounts according to value.
+    # e.g. there might not be enough liquidity for 100 BTC
+    starting_amount_dict = {
+        "USDT": 100,
+        "USDC": 100,
+        "BTC": 0.05,
+        "ETH": 0.1
+    }
+    if swap_1 in starting_amount_dict:
+        starting_amount = starting_amount_dict[swap_1]
+
+    # # Define example pairs
+    # contract_1 = "USDT_BTC"
+    # contract_2 = "BTC_INJ"
+    # contract_3 = "USDT_INJ"
+
+    # # Define example direction for trades
+    # contract_1_direction = "base_to_quote"
+    # contract_2_direction = "base_to_quote"
+    # contract_3_direction = "quote_to_base"
+
+    # import vales from surface rate calculation
+    swap_1 = surface_arb["swap_1"]
+    contract_1 = surface_arb["contract_1"]
+    contract_2 = surface_arb["contract_2"]
+    contract_3 = surface_arb["contract_3"]
+    contract_1_direction = surface_arb["direction_trade_1"]
+    contract_2_direction = surface_arb["direction_trade_2"]
+    contract_3_direction = surface_arb["direction_trade_3"]
+
+    # Get Order book for trade assessment
+    url1 = f"https://poloniex.com/public?command=returnOrderBook&currencyPair={contract_1}&depth=20"
+    depth_1_prices = get_coin_tickers(url1)
+    depth_1_reformatted_prices = reformat_orderbook(
+        depth_1_prices, contract_1_direction)
+    time.sleep(0.3)
+    url2 = f"https://poloniex.com/public?command=returnOrderBook&currencyPair={contract_2}&depth=20"
+    depth_2_prices = get_coin_tickers(url2)
+    depth_2_reformatted_prices = reformat_orderbook(
+        depth_2_prices, contract_2_direction)
+    time.sleep(0.3)
+    url3 = f"https://poloniex.com/public?command=returnOrderBook&currencyPair={contract_3}&depth=20"
+    depth_3_prices = get_coin_tickers(url3)
+    depth_3_reformatted_prices = reformat_orderbook(
+        depth_3_prices, contract_3_direction)
+
+    # Get acquired coins
+    acquired_coin_t1 = calculate_acquired_coin(
+        starting_amount, depth_1_reformatted_prices)
+    acquired_coin_t2 = calculate_acquired_coin(
+        acquired_coin_t1, depth_2_reformatted_prices)
+    acquired_coin_t3 = calculate_acquired_coin(
+        acquired_coin_t2, depth_3_reformatted_prices)
+
+    # print(
+    #     f"Trade starting amount: {starting_amount}, acquired coins: {acquired_coin_t3}")
+
+    # Calculate Profit Loss aka Real Rate
+    profit_loss = acquired_coin_t3 - starting_amount
+    real_rate_perc = (profit_loss / starting_amount) * \
+        100 if profit_loss != 0 else 0
+
+    if real_rate_perc > 0:
+        return {
+            "profit_loss": profit_loss,
+            "real_rate_perc": real_rate_perc,
+            "contract_1": contract_1,
+            "contract_2": contract_2,
+            "contract_3": contract_3,
+            "contract_1_direction": contract_1_direction,
+            "contract_2_direction": contract_2_direction,
+            "contract_3_direction": contract_3_direction,
+        }
+    else:
+        print("trade was not profitable at real rate")
+        return {}

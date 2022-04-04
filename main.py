@@ -53,6 +53,7 @@ def step_2():
 
     # Loot through and structure price information
     while True:
+        # we can only do 6 api calls per second, without getting blocked
         time.sleep(0.5)
         for t_pair in structured_pairs:
             prices_dict = func_arbitrage.get_price_for_t_pair(
@@ -60,7 +61,12 @@ def step_2():
             surface_arb = func_arbitrage.calc_triangular_arb_surface_rate(
                 t_pair, prices_dict)
             if len(surface_arb) > 0:
-                print(surface_arb)
+                # Step 3: Get Real Rate
+                real_rate_arb = func_arbitrage.get_depth_from_orderbook(
+                    surface_arb)
+                if len(real_rate_arb):
+                    print(real_rate_arb)
+                time.sleep(1)
 
 
 """ MAIN """
